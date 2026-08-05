@@ -1,0 +1,25 @@
+{
+  "name": "mcp-seo-audit",
+  "version": "0.1.0",
+  "description": "MCP server that gives AI assistants on-page SEO superpowers: audit any URL's metas, schema, robots.txt, sitemaps and links",
+  "type": "module",
+  "bin": { "mcp-seo-audit": "dist/index.js" },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "keywords": ["mcp", "model-context-protocol", "seo", "audit", "schema", "sitemap", "ai"],
+  "author": "mk-techi",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "latest",
+    "cheerio": "^1.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0"
+  }
+}
