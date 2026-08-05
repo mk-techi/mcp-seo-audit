@@ -1,5 +1,5 @@
 # mcp-seo-audit
-![demo](https://raw.githubusercontent.com/mk-techi/mcp-seo-audit/main/demo.gif)![demo](demo.gif)
+![demo](https://github.com/mk-techi/mcp-seo-audit/raw/main/demo.gif)
 
 **On-page SEO analysis as MCP tools.**
 
