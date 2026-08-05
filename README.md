@@ -1,4 +1,5 @@
 # mcp-seo-audit
+![demo](demo.gif)
 
 **On-page SEO analysis as MCP tools.**
 
