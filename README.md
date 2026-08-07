@@ -72,7 +72,7 @@ npm start       # runs the compiled server
 
 ## Roadmap
 
-- [ ] [`crawl_site` - follow internal links up to N pages and aggregate issues](https://github.com/mk-techi/mcp-seo-audit/issues/1)
+- [x] [`crawl_site` - follow internal links up to N pages and aggregate issues](https://github.com/mk-techi/mcp-seo-audit/issues/1)
 - [ ] [Core Web Vitals via the public CrUX API](https://github.com/mk-techi/mcp-seo-audit/issues/2)
 - [ ] [Schema validation against schema.org definitions](https://github.com/mk-techi/mcp-seo-audit/issues/3)
 - [ ] [Publish to npm (`npx mcp-seo-audit`)](https://github.com/mk-techi/mcp-seo-audit/issues/4)
