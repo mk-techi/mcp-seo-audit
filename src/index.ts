@@ -28,6 +28,164 @@ function collectTypes(node: unknown): string[] {
   return [];
 }
 
+function auditDocument(
+  $: cheerio.CheerioAPI,
+  requestedUrl: string,
+  finalUrl: string,
+  status: number
+) {
+  const title = $("title").first().text().trim();
+  const description = $('meta[name="description"]').attr("content")?.trim() ?? null;
+  const images = $("img");
+  const openGraph: Record<string, string> = {};
+  $('meta[property^="og:"]').each((_, el) => {
+    openGraph[$(el).attr("property")!] = $(el).attr("content") ?? "";
+  });
+
+  return {
+    requestedUrl,
+    finalUrl,
+    httpStatus: status,
+    title: { text: title, length: title.length },
+    metaDescription: { text: description, length: description?.length ?? 0 },
+    canonical: $('link[rel="canonical"]').attr("href") ?? null,
+    metaRobots: $('meta[name="robots"]').attr("content") ?? null,
+    viewport: $('meta[name="viewport"]').attr("content") ?? null,
+    lang: $("html").attr("lang") ?? null,
+    hreflang: $('link[rel="alternate"][hreflang]')
+      .map((_, el) => ({ hreflang: $(el).attr("hreflang"), href: $(el).attr("href") }))
+      .get(),
+    h1Count: $("h1").length,
+    headings: $("h1, h2, h3")
+      .map((_, el) => ({ tag: el.tagName.toLowerCase(), text: $(el).text().trim().slice(0, 120) }))
+      .get(),
+    images: {
+      total: images.length,
+      missingAlt: images.filter((_, el) => !$(el).attr("alt")?.trim()).length,
+    },
+    openGraph,
+    twitterCard: $('meta[name="twitter:card"]').attr("content") ?? null,
+    wordCount: $("body").text().replace(/\s+/g, " ").trim().split(" ").length,
+  };
+}
+
+function parseJsonLd($: cheerio.CheerioAPI): { blocks: unknown[]; errors: string[] } {
+  const blocks: unknown[] = [];
+  const errors: string[] = [];
+  $('script[type="application/ld+json"]').each((i, el) => {
+    try {
+      blocks.push(JSON.parse($(el).contents().text()));
+    } catch (err) {
+      errors.push(`Block ${i}: ${(err as Error).message}`);
+    }
+  });
+  return { blocks, errors };
+}
+
+function extractPageLinks(
+  $: cheerio.CheerioAPI,
+  finalUrl: string
+): { internal: string[]; external: string[]; nofollow: number } {
+  const origin = new URL(finalUrl).origin;
+  const seen = new Set<string>();
+  const internal: string[] = [];
+  const external: string[] = [];
+  let nofollow = 0;
+
+  $("a[href]").each((_, el) => {
+    const href = $(el).attr("href")!;
+    if (/^(#|mailto:|tel:)/.test(href)) return;
+
+    let absolute: string;
+    try {
+      absolute = new URL(href, finalUrl).toString();
+    } catch {
+      return;
+    }
+    if (seen.has(absolute)) return;
+    seen.add(absolute);
+
+    if (($(el).attr("rel") ?? "").includes("nofollow")) nofollow++;
+    (absolute.startsWith(origin) ? internal : external).push(absolute);
+  });
+
+  return { internal, external, nofollow };
+}
+
+const CRAWL_DELAY_MS = 200;
+const NON_HTML_EXTENSION =
+  /\.(pdf|jpe?g|png|gif|bmp|svg|webp|avif|ico|zip|gz|tgz|tar|rar|7z|mp[34g]|m4a|wav|mov|avi|webm|css|js|mjs|json|xml|rss|txt|csv|docx?|xlsx?|pptx?|woff2?|ttf|otf|eot|dmg|exe|apk)$/i;
+
+type IssueCategory =
+  | "missingMetaDescription"
+  | "titleTooLong"
+  | "titleTooShort"
+  | "missingH1"
+  | "multipleH1"
+  | "duplicateTitles"
+  | "imagesWithoutAlt"
+  | "missingCanonical"
+  | "noJsonLd";
+
+type FetchFailure = {
+  url: string;
+  status: number | null;
+  foundOn: string | null;
+  error: string | null;
+};
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function errorMessage(err: unknown): string {
+  const { message, cause } = err as { message: string; cause?: unknown };
+  return cause instanceof Error ? `${message}: ${cause.message}` : message;
+}
+
+function normalizeUrl(raw: string): string {
+  const url = new URL(raw);
+  url.hash = "";
+  if (url.pathname.length > 1 && url.pathname.endsWith("/")) {
+    url.pathname = url.pathname.slice(0, -1);
+  }
+  return url.toString();
+}
+
+function crawlableUrl(raw: string, origin: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.origin !== origin) return null;
+  if (NON_HTML_EXTENSION.test(url.pathname)) return null;
+  return normalizeUrl(url.toString());
+}
+
+function issueGroup<T>(urls: T[], limit: number) {
+  return { count: urls.length, urls: urls.slice(0, limit), truncated: urls.length > limit };
+}
+
+function crawlSummary(
+  startUrl: string,
+  pagesCrawled: number,
+  pagesFailed: number,
+  issues: Record<IssueCategory, string[]>
+): string {
+  const nonEmpty = Object.values(issues).filter((urls) => urls.length > 0);
+  const categories = nonEmpty.length + (pagesFailed > 0 ? 1 : 0);
+  const total = nonEmpty.reduce((sum, urls) => sum + urls.length, 0) + pagesFailed;
+  return (
+    `Crawled ${pagesCrawled} page(s) from ${startUrl}` +
+    (pagesFailed > 0 ? `, ${pagesFailed} failed to fetch` : "") +
+    (total > 0
+      ? `, and found ${total} issue(s) across ${categories} categor${categories === 1 ? "y" : "ies"}.`
+      : ", and found no issues.")
+  );
+}
+
 const server = new McpServer({ name: "mcp-seo-audit", version: "0.1.0" });
 
 server.registerTool(
@@ -42,41 +200,7 @@ server.registerTool(
   },
   async ({ url }) => {
     const { status, body, finalUrl } = await get(url);
-    const $ = cheerio.load(body);
-
-    const title = $("title").first().text().trim();
-    const description = $('meta[name="description"]').attr("content")?.trim() ?? null;
-    const images = $("img");
-    const openGraph: Record<string, string> = {};
-    $('meta[property^="og:"]').each((_, el) => {
-      openGraph[$(el).attr("property")!] = $(el).attr("content") ?? "";
-    });
-
-    return result({
-      requestedUrl: url,
-      finalUrl,
-      httpStatus: status,
-      title: { text: title, length: title.length },
-      metaDescription: { text: description, length: description?.length ?? 0 },
-      canonical: $('link[rel="canonical"]').attr("href") ?? null,
-      metaRobots: $('meta[name="robots"]').attr("content") ?? null,
-      viewport: $('meta[name="viewport"]').attr("content") ?? null,
-      lang: $("html").attr("lang") ?? null,
-      hreflang: $('link[rel="alternate"][hreflang]')
-        .map((_, el) => ({ hreflang: $(el).attr("hreflang"), href: $(el).attr("href") }))
-        .get(),
-      h1Count: $("h1").length,
-      headings: $("h1, h2, h3")
-        .map((_, el) => ({ tag: el.tagName.toLowerCase(), text: $(el).text().trim().slice(0, 120) }))
-        .get(),
-      images: {
-        total: images.length,
-        missingAlt: images.filter((_, el) => !$(el).attr("alt")?.trim()).length,
-      },
-      openGraph,
-      twitterCard: $('meta[name="twitter:card"]').attr("content") ?? null,
-      wordCount: $("body").text().replace(/\s+/g, " ").trim().split(" ").length,
-    });
+    return result(auditDocument(cheerio.load(body), url, finalUrl, status));
   }
 );
 
@@ -91,17 +215,7 @@ server.registerTool(
   },
   async ({ url }) => {
     const { body } = await get(url);
-    const $ = cheerio.load(body);
-
-    const blocks: unknown[] = [];
-    const errors: string[] = [];
-    $('script[type="application/ld+json"]').each((i, el) => {
-      try {
-        blocks.push(JSON.parse($(el).contents().text()));
-      } catch (err) {
-        errors.push(`Block ${i}: ${(err as Error).message}`);
-      }
-    });
+    const { blocks, errors } = parseJsonLd(cheerio.load(body));
 
     return result({
       url,
@@ -207,30 +321,7 @@ server.registerTool(
   },
   async ({ url, checkBroken, checkLimit }) => {
     const { body, finalUrl } = await get(url);
-    const $ = cheerio.load(body);
-    const origin = new URL(finalUrl).origin;
-
-    const seen = new Set<string>();
-    const internal: string[] = [];
-    const external: string[] = [];
-    let nofollow = 0;
-
-    $("a[href]").each((_, el) => {
-      const href = $(el).attr("href")!;
-      if (/^(#|mailto:|tel:)/.test(href)) return;
-
-      let absolute: string;
-      try {
-        absolute = new URL(href, finalUrl).toString();
-      } catch {
-        return;
-      }
-      if (seen.has(absolute)) return;
-      seen.add(absolute);
-
-      if (($(el).attr("rel") ?? "").includes("nofollow")) nofollow++;
-      (absolute.startsWith(origin) ? internal : external).push(absolute);
-    });
+    const { internal, external, nofollow } = extractPageLinks(cheerio.load(body), finalUrl);
 
     let broken: { url: string; status: number }[] = [];
     if (checkBroken) {
@@ -259,6 +350,114 @@ server.registerTool(
       brokenChecked: checkBroken,
       broken,
     });
+  }
+);
+
+server.registerTool(
+  "crawl_site",
+  {
+    title: "Crawl a site and aggregate SEO issues",
+    description:
+      "Breadth-first crawl of internal links from a starting URL, auditing every page and " +
+      "aggregating the findings by issue type: missing metas, title length, H1 problems, " +
+      "duplicate titles, image alt coverage, canonicals, JSON-LD and fetch errors. " +
+      "Fetch errors carry the HTTP status (null for a network-level failure, with the " +
+      "message in error) and foundOn, the first page found linking to that URL — not every " +
+      "page linking to it, since a dead link in a shared template is fixed once.",
+    inputSchema: {
+      startUrl: z.string().url(),
+      maxPages: z.number().int().min(1).max(100).default(20),
+      maxIssuesPerCategory: z.number().int().min(1).max(100).default(10),
+    },
+  },
+  async ({ startUrl, maxPages, maxIssuesPerCategory }) => {
+    const origin = new URL(startUrl).origin;
+    const queue: string[] = [normalizeUrl(startUrl)];
+    const queued = new Set<string>(queue);
+    const visited = new Set<string>();
+
+    const issues: Record<IssueCategory, string[]> = {
+      missingMetaDescription: [],
+      titleTooLong: [],
+      titleTooShort: [],
+      missingH1: [],
+      multipleH1: [],
+      duplicateTitles: [],
+      imagesWithoutAlt: [],
+      missingCanonical: [],
+      noJsonLd: [],
+    };
+    const fetchErrors: FetchFailure[] = [];
+    const titles = new Map<string, string[]>();
+    const foundOn = new Map<string, string>();
+    let pagesCrawled = 0;
+
+    while (queue.length > 0 && visited.size < maxPages) {
+      const current = queue.shift()!;
+      visited.add(current);
+      if (visited.size > 1) await sleep(CRAWL_DELAY_MS);
+
+      const fail = (status: number | null, error: string | null) =>
+        fetchErrors.push({ url: current, status, foundOn: foundOn.get(current) ?? null, error });
+
+      let page: Fetched;
+      try {
+        page = await get(current);
+      } catch (err) {
+        fail(null, errorMessage(err));
+        continue;
+      }
+      if (page.status >= 400) {
+        fail(page.status, null);
+        continue;
+      }
+
+      pagesCrawled++;
+      const $ = cheerio.load(page.body);
+      const audit = auditDocument($, current, page.finalUrl, page.status);
+
+      if (!audit.metaDescription.text) issues.missingMetaDescription.push(current);
+      if (audit.title.length > 70) issues.titleTooLong.push(current);
+      if (audit.title.length < 30) issues.titleTooShort.push(current);
+      if (audit.h1Count === 0) issues.missingH1.push(current);
+      if (audit.h1Count > 1) issues.multipleH1.push(current);
+      if (audit.images.missingAlt > 0) issues.imagesWithoutAlt.push(current);
+      if (!audit.canonical) issues.missingCanonical.push(current);
+      if (parseJsonLd($).blocks.length === 0) issues.noJsonLd.push(current);
+      if (audit.title.text) {
+        const sameTitle = titles.get(audit.title.text) ?? [];
+        sameTitle.push(current);
+        titles.set(audit.title.text, sameTitle);
+      }
+
+      for (const link of extractPageLinks($, page.finalUrl).internal) {
+        const next = crawlableUrl(link, origin);
+        if (!next || queued.has(next)) continue;
+        queued.add(next);
+        foundOn.set(next, current);
+        queue.push(next);
+      }
+    }
+
+    for (const urls of titles.values()) {
+      if (urls.length > 1) issues.duplicateTitles.push(...urls);
+    }
+
+    const pagesFailed = fetchErrors.length;
+    const report: Record<string, unknown> = {
+      startUrl,
+      pagesCrawled,
+      pagesFailed,
+      summary: crawlSummary(startUrl, pagesCrawled, pagesFailed, issues),
+    };
+    for (const [category, urls] of Object.entries(issues)) {
+      if (urls.length > 0) report[category] = issueGroup(urls, maxIssuesPerCategory);
+    }
+    if (fetchErrors.length > 0) {
+      report.fetchErrors = issueGroup(fetchErrors, maxIssuesPerCategory);
+    }
+
+    return result(report);
   }
 );
 
