@@ -12,7 +12,7 @@ An [MCP](https://modelcontextprotocol.io) server that exposes on-page SEO analys
 | Tool | Returns |
 |---|---|
 | `audit_page` | Title/meta lengths, canonical, robots meta, Open Graph & Twitter cards, headings outline, image alt coverage, word count, lang, hreflang |
-| `extract_schema` | Every JSON-LD block parsed, `@type` values, parse errors |
+| `extract_schema` | Every JSON-LD block parsed, `@type` values, parse errors, and validation against Google's rich result requirements (missing required vs. recommended properties) |
 | `check_robots` | robots.txt user-agent groups, allow/disallow rules, declared sitemaps |
 | `parse_sitemap` | URL counts, `lastmod` sample, nested sitemap indexes |
 | `extract_links` | Internal/external/nofollow split, optional broken-link check |
@@ -79,7 +79,7 @@ Then point the client at the local checkout instead of the published package:
 Once connected, the six tools are available. Example prompts:
 
 - *Audit example.com and give me a prioritized fix list.*
-- *Does this page have valid JSON-LD? Which types?*
+- *Does this page have valid JSON-LD? Which types, and what's missing for rich results?*
 - *Compare the on-page SEO of my landing page against a competitor's.*
 - *Find broken internal links on the homepage.*
 
@@ -94,7 +94,7 @@ npm start       # runs the compiled server
 
 - [x] [`crawl_site` - follow internal links up to N pages and aggregate issues](https://github.com/mk-techi/mcp-seo-audit/issues/1)
 - [ ] [Core Web Vitals via the public CrUX API](https://github.com/mk-techi/mcp-seo-audit/issues/2)
-- [ ] [Schema validation against schema.org definitions](https://github.com/mk-techi/mcp-seo-audit/issues/3)
+- [x] [Schema validation against schema.org definitions](https://github.com/mk-techi/mcp-seo-audit/issues/3)
 - [x] [Publish to npm (`npx mcp-seo-audit`)](https://github.com/mk-techi/mcp-seo-audit/issues/4)
 
 ## License

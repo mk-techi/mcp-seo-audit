@@ -82,6 +82,155 @@ function parseJsonLd($: cheerio.CheerioAPI): { blocks: unknown[]; errors: string
   return { blocks, errors };
 }
 
+type SchemaRule = { required: string[]; recommended: string[] };
+
+const ARTICLE_RULE: SchemaRule = {
+  required: ["headline"],
+  recommended: ["image", "author", "datePublished", "dateModified", "publisher"],
+};
+
+const SCHEMA_RULES: Record<string, SchemaRule> = {
+  Article: ARTICLE_RULE,
+  BlogPosting: ARTICLE_RULE,
+  NewsArticle: ARTICLE_RULE,
+  Product: {
+    required: ["name", "offers|review|aggregateRating"],
+    recommended: ["image", "description", "brand", "sku|mpn|gtin|gtin8|gtin13|gtin14"],
+  },
+  Offer: {
+    required: ["price|priceSpecification", "priceCurrency|priceSpecification"],
+    recommended: ["availability", "url", "priceValidUntil", "itemCondition"],
+  },
+  AggregateRating: {
+    required: ["ratingValue", "ratingCount|reviewCount"],
+    recommended: ["bestRating", "worstRating"],
+  },
+  Review: {
+    required: ["author", "reviewRating"],
+    recommended: ["datePublished", "reviewBody"],
+  },
+  FAQPage: { required: ["mainEntity"], recommended: [] },
+  Question: { required: ["name", "acceptedAnswer"], recommended: [] },
+  Answer: { required: ["text"], recommended: ["url"] },
+  Organization: {
+    required: ["name"],
+    recommended: ["url", "logo", "sameAs", "description", "address", "contactPoint"],
+  },
+  LocalBusiness: {
+    required: ["name", "address"],
+    recommended: [
+      "image",
+      "telephone",
+      "url",
+      "openingHoursSpecification|openingHours",
+      "geo",
+      "priceRange",
+    ],
+  },
+  Person: { required: ["name"], recommended: ["url", "image", "sameAs", "jobTitle"] },
+  BreadcrumbList: { required: ["itemListElement"], recommended: [] },
+  ListItem: { required: ["position", "name"], recommended: ["item"] },
+  WebSite: { required: ["name", "url"], recommended: ["alternateName", "publisher", "inLanguage"] },
+  Recipe: {
+    required: ["name", "image"],
+    recommended: [
+      "author",
+      "datePublished",
+      "description",
+      "prepTime",
+      "cookTime",
+      "totalTime",
+      "recipeYield",
+      "recipeIngredient",
+      "recipeInstructions",
+      "nutrition",
+      "aggregateRating",
+      "video",
+    ],
+  },
+  Event: {
+    required: ["name", "startDate", "location"],
+    recommended: [
+      "description",
+      "endDate",
+      "eventAttendanceMode",
+      "eventStatus",
+      "image",
+      "offers",
+      "organizer",
+      "performer",
+    ],
+  },
+  VideoObject: {
+    required: ["name", "thumbnailUrl", "uploadDate"],
+    recommended: ["description", "duration", "contentUrl|embedUrl", "expires", "interactionStatistic"],
+  },
+};
+
+type TypedNode = { type: string; node: Record<string, unknown> };
+type BlockValidation = { type: string; missingRequired: string[]; missingRecommended: string[] };
+
+function collectTypedNodes(node: unknown): TypedNode[] {
+  if (Array.isArray(node)) return node.flatMap(collectTypedNodes);
+  if (!node || typeof node !== "object") return [];
+  const record = node as Record<string, unknown>;
+  const type = record["@type"];
+  const own = typeof type === "string" ? [type] : Array.isArray(type) ? (type as string[]) : [];
+  return [
+    ...own.map((name) => ({ type: name, node: record })),
+    ...Object.values(record).flatMap(collectTypedNodes),
+  ];
+}
+
+function isReference(node: Record<string, unknown>): boolean {
+  return "@id" in node && Object.keys(node).every((key) => key === "@id" || key === "@type");
+}
+
+function filled(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  return true;
+}
+
+function hasProperty(node: Record<string, unknown>, property: string): boolean {
+  return property.split("|").some((name) => filled(node[name]));
+}
+
+function validateSchema(blocks: unknown[]): BlockValidation[] {
+  return collectTypedNodes(blocks).flatMap(({ type, node }) => {
+    const rule = SCHEMA_RULES[type];
+    if (!rule || isReference(node)) return [];
+    const missing = (properties: string[]) => properties.filter((p) => !hasProperty(node, p));
+    return [
+      {
+        type,
+        missingRequired: missing(rule.required),
+        missingRecommended: missing(rule.recommended),
+      },
+    ];
+  });
+}
+
+function schemaSummary(validation: BlockValidation[]): string {
+  if (validation.length === 0) return "No JSON-LD entity matched a known Google rich result type.";
+  const invalid = validation.filter((v) => v.missingRequired.length > 0);
+  const incomplete = validation.filter(
+    (v) => v.missingRequired.length === 0 && v.missingRecommended.length > 0
+  );
+  const checked = `Checked ${validation.length} entit${validation.length === 1 ? "y" : "ies"}`;
+  if (invalid.length === 0 && incomplete.length === 0) {
+    return `${checked}: all required and recommended properties present.`;
+  }
+  const invalidTypes = [...new Set(invalid.map((v) => v.type))].join(", ");
+  const complete = validation.length - invalid.length - incomplete.length;
+  return (
+    `${checked}: ${invalid.length} invalid for Google` +
+    (invalid.length > 0 ? ` (${invalidTypes})` : "") +
+    `, ${incomplete.length} missing recommended properties only, ${complete} complete.`
+  );
+}
+
 function extractPageLinks(
   $: cheerio.CheerioAPI,
   finalUrl: string
@@ -125,7 +274,8 @@ type IssueCategory =
   | "duplicateTitles"
   | "imagesWithoutAlt"
   | "missingCanonical"
-  | "noJsonLd";
+  | "noJsonLd"
+  | "invalidJsonLd";
 
 type FetchFailure = {
   url: string;
@@ -186,7 +336,7 @@ function crawlSummary(
   );
 }
 
-const server = new McpServer({ name: "mcp-seo-audit", version: "0.1.0" });
+const server = new McpServer({ name: "mcp-seo-audit", version: "0.2.0" });
 
 server.registerTool(
   "audit_page",
@@ -207,21 +357,28 @@ server.registerTool(
 server.registerTool(
   "extract_schema",
   {
-    title: "Extract structured data (JSON-LD)",
+    title: "Extract and validate structured data (JSON-LD)",
     description:
       "Extract every JSON-LD block from a page, list the @type values found, and return " +
-      "the parsed objects along with any parse errors.",
+      "the parsed objects along with any parse errors. Every entity whose @type has known " +
+      "Google Search Central requirements is validated: missingRequired lists properties " +
+      "without which Google drops the entity from rich results, missingRecommended lists " +
+      "those that only degrade the result. A property written 'a|b' is satisfied by either " +
+      "one. Types with no known Google requirements are skipped, not reported as invalid.",
     inputSchema: { url: z.string().url() },
   },
   async ({ url }) => {
     const { body } = await get(url);
     const { blocks, errors } = parseJsonLd(cheerio.load(body));
+    const validation = validateSchema(blocks);
 
     return result({
       url,
       blockCount: blocks.length,
       typesFound: [...new Set(blocks.flatMap(collectTypes))],
       parseErrors: errors,
+      validation,
+      validationSummary: schemaSummary(validation),
       blocks,
     });
   }
@@ -361,6 +518,8 @@ server.registerTool(
       "Breadth-first crawl of internal links from a starting URL, auditing every page and " +
       "aggregating the findings by issue type: missing metas, title length, H1 problems, " +
       "duplicate titles, image alt coverage, canonicals, JSON-LD and fetch errors. " +
+      "invalidJsonLd lists pages where a JSON-LD entity is missing a property Google " +
+      "requires for its rich result; use extract_schema on those pages for the details. " +
       "Fetch errors carry the HTTP status (null for a network-level failure, with the " +
       "message in error) and foundOn, the first page found linking to that URL — not every " +
       "page linking to it, since a dead link in a shared template is fixed once.",
@@ -386,6 +545,7 @@ server.registerTool(
       imagesWithoutAlt: [],
       missingCanonical: [],
       noJsonLd: [],
+      invalidJsonLd: [],
     };
     const fetchErrors: FetchFailure[] = [];
     const titles = new Map<string, string[]>();
@@ -423,7 +583,11 @@ server.registerTool(
       if (audit.h1Count > 1) issues.multipleH1.push(current);
       if (audit.images.missingAlt > 0) issues.imagesWithoutAlt.push(current);
       if (!audit.canonical) issues.missingCanonical.push(current);
-      if (parseJsonLd($).blocks.length === 0) issues.noJsonLd.push(current);
+      const jsonLd = parseJsonLd($);
+      if (jsonLd.blocks.length === 0) issues.noJsonLd.push(current);
+      else if (validateSchema(jsonLd.blocks).some((v) => v.missingRequired.length > 0)) {
+        issues.invalidJsonLd.push(current);
+      }
       if (audit.title.text) {
         const sameTitle = titles.get(audit.title.text) ?? [];
         sameTitle.push(current);
