@@ -5,7 +5,7 @@ import * as cheerio from "cheerio";
 import { z } from "zod";
 
 const USER_AGENT =
-  "Mozilla/5.0 (compatible; mcp-seo-audit/0.1; +https://github.com/mk-techi/mcp-seo-audit)";
+  "Mozilla/5.0 (compatible; mcp-seo-audit/0.2; +https://github.com/mk-techi/mcp-seo-audit)";
 
 type Fetched = { status: number; body: string; finalUrl: string };
 
