@@ -94,7 +94,7 @@ npm start       # runs the compiled server
 
 - [x] [`crawl_site` - follow internal links up to N pages and aggregate issues](https://github.com/mk-techi/mcp-seo-audit/issues/1)
 - [ ] [Core Web Vitals via the public CrUX API](https://github.com/mk-techi/mcp-seo-audit/issues/2)
-- [x] [Schema validation against schema.org definitions](https://github.com/mk-techi/mcp-seo-audit/issues/3)
+- [x] [Schema validation against Google's rich results requirements](https://github.com/mk-techi/mcp-seo-audit/issues/3)
 - [x] [Publish to npm (`npx mcp-seo-audit`)](https://github.com/mk-techi/mcp-seo-audit/issues/4)
 
 ## License

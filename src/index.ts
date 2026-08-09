@@ -5,13 +5,45 @@ import * as cheerio from "cheerio";
 import { z } from "zod";
 
 const USER_AGENT =
-  "Mozilla/5.0 (compatible; mcp-seo-audit/0.2; +https://github.com/mk-techi/mcp-seo-audit)";
+  "Mozilla/5.0 (compatible; mcp-seo-audit/0.3; +https://github.com/mk-techi/mcp-seo-audit)";
+
+const FETCH_TIMEOUT_MS = 10_000;
+const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
+// The sitemap protocol itself allows 50 MB uncompressed, and both limits count
+// decompressed bytes (fetch inflates gzip before the body stream is read).
+const SITEMAP_TIMEOUT_MS = 30_000;
+const MAX_SITEMAP_BYTES = 50 * 1024 * 1024;
 
 type Fetched = { status: number; body: string; finalUrl: string };
+type FetchLimits = { timeoutMs?: number; maxBytes?: number };
 
-async function get(url: string): Promise<Fetched> {
-  const res = await fetch(url, { headers: { "User-Agent": USER_AGENT }, redirect: "follow" });
-  return { status: res.status, body: await res.text(), finalUrl: res.url };
+async function readBody(res: Response, maxBytes: number): Promise<string> {
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > maxBytes) {
+      // cancel() rejects if the stream errored meanwhile; the size error must win
+      await reader.cancel().catch(() => {});
+      throw new Error(`Response exceeded ${maxBytes / 1024 / 1024} MB limit`);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf-8");
+}
+
+async function get(url: string, limits: FetchLimits = {}): Promise<Fetched> {
+  const res = await fetch(url, {
+    headers: { "User-Agent": USER_AGENT },
+    redirect: "follow",
+    signal: AbortSignal.timeout(limits.timeoutMs ?? FETCH_TIMEOUT_MS),
+  });
+  const body = await readBody(res, limits.maxBytes ?? MAX_RESPONSE_BYTES);
+  return { status: res.status, body, finalUrl: res.url };
 }
 
 function result(data: unknown) {
@@ -255,7 +287,7 @@ function extractPageLinks(
     seen.add(absolute);
 
     if (($(el).attr("rel") ?? "").includes("nofollow")) nofollow++;
-    (absolute.startsWith(origin) ? internal : external).push(absolute);
+    (new URL(absolute).origin === origin ? internal : external).push(absolute);
   });
 
   return { internal, external, nofollow };
@@ -440,7 +472,10 @@ server.registerTool(
     },
   },
   async ({ sitemapUrl, sampleSize }) => {
-    const { status, body } = await get(sitemapUrl);
+    const { status, body } = await get(sitemapUrl, {
+      timeoutMs: SITEMAP_TIMEOUT_MS,
+      maxBytes: MAX_SITEMAP_BYTES,
+    });
     if (status >= 400) return result({ sitemapUrl, status, exists: false });
 
     const $ = cheerio.load(body, { xmlMode: true });
@@ -469,7 +504,9 @@ server.registerTool(
     title: "Extract and check links",
     description:
       "List a page's links split into internal and external with nofollow counts. " +
-      "Optionally HEAD-checks internal links to find broken ones.",
+      "Optionally HEAD-checks internal links to find broken ones: status >= 400, or " +
+      "status null with the message in error for a network-level failure — including " +
+      "links that took longer than 10 s and timed out.",
     inputSchema: {
       url: z.string().url(),
       checkBroken: z.boolean().default(false),
@@ -480,21 +517,28 @@ server.registerTool(
     const { body, finalUrl } = await get(url);
     const { internal, external, nofollow } = extractPageLinks(cheerio.load(body), finalUrl);
 
-    let broken: { url: string; status: number }[] = [];
+    type BrokenLink = { url: string; status: number | null; error?: string };
+    let broken: BrokenLink[] = [];
     if (checkBroken) {
+      const toCheck = internal.slice(0, checkLimit);
       const checks = await Promise.allSettled(
-        internal.slice(0, checkLimit).map(async (link) => {
+        toCheck.map(async (link) => {
           const res = await fetch(link, {
             method: "HEAD",
             headers: { "User-Agent": USER_AGENT },
             redirect: "follow",
+            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
           });
           return { url: link, status: res.status };
         })
       );
-      broken = checks
-        .flatMap((c) => (c.status === "fulfilled" ? [c.value] : []))
-        .filter((c) => c.status >= 400);
+      broken = checks.flatMap((c, i): BrokenLink[] =>
+        c.status === "fulfilled"
+          ? c.value.status >= 400
+            ? [c.value]
+            : []
+          : [{ url: toCheck[i], status: null, error: errorMessage(c.reason) }]
+      );
     }
 
     return result({
@@ -530,7 +574,7 @@ server.registerTool(
     },
   },
   async ({ startUrl, maxPages, maxIssuesPerCategory }) => {
-    const origin = new URL(startUrl).origin;
+    let origin = new URL(startUrl).origin;
     const queue: string[] = [normalizeUrl(startUrl)];
     const queued = new Set<string>(queue);
     const visited = new Set<string>();
@@ -570,6 +614,14 @@ server.registerTool(
       if (page.status >= 400) {
         fail(page.status, null);
         continue;
+      }
+      // The start URL may redirect to another origin (http→https, apex→www):
+      // follow the site where it actually lives, or every link gets rejected.
+      // Mark the landing URL as queued too, or the site's self-links (logo,
+      // nav "/") would re-crawl the same page under its post-redirect name.
+      if (visited.size === 1) {
+        origin = new URL(page.finalUrl).origin;
+        queued.add(normalizeUrl(page.finalUrl));
       }
 
       pagesCrawled++;
