@@ -15,6 +15,8 @@
     "dev": "tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
+    "pretest": "npm run build",
+    "test": "node test/e2e-fetching.mjs && node test/e2e-vitals.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
