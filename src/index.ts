@@ -368,7 +368,7 @@ function crawlSummary(
   );
 }
 
-const server = new McpServer({ name: "mcp-seo-audit", version: "0.3.0" });
+const server = new McpServer({ name: "mcp-seo-audit", version: "0.3.1" });
 
 server.registerTool(
   "audit_page",
