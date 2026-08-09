@@ -442,7 +442,7 @@ function vitalsSummary(vitals: Record<string, Vital>): string {
   return parts.join(", ") + (overall ? `. Core Web Vitals assessment: ${overall}.` : ".");
 }
 
-const server = new McpServer({ name: "mcp-seo-audit", version: "0.4.0" });
+const server = new McpServer({ name: "mcp-seo-audit", version: "0.4.1" });
 
 server.registerTool(
   "audit_page",

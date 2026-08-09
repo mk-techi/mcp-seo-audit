@@ -23,6 +23,8 @@ The server returns structured data and leaves the interpretation to the client. 
 
 ## Install
 
+Requires Node.js 20.18.1 or newer — cheerio pulls in undici 7, which needs the `File` global introduced in Node 20. On older versions the server fails to start.
+
 No install step — register the server with any MCP client and `npx` fetches it on first run:
 
 ```json

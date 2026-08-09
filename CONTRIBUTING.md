@@ -6,7 +6,7 @@ Issues labelled [`good first issue`](https://github.com/mk-techi/mcp-seo-audit/l
 
 ## Requirements
 
-Node.js 18 or newer. The server uses the built-in `fetch` and `AbortSignal.timeout`, so nothing older works.
+Node.js 20.18.1 or newer. The floor comes from cheerio 1.2.0, which statically imports undici 7 — and undici references the `File` global while its module is still loading. `File` only became a global in Node 20, so on Node 18 the server dies on startup with `ReferenceError: File is not defined`, before it ever reads a request.
 
 ## Local setup
 
