@@ -1,6 +1,7 @@
 # mcp-seo-audit
 [![npm version](https://img.shields.io/npm/v/mcp-seo-audit)](https://www.npmjs.com/package/mcp-seo-audit)
 [![npm downloads](https://img.shields.io/npm/dm/mcp-seo-audit)](https://www.npmjs.com/package/mcp-seo-audit)
+[![CI](https://github.com/mk-techi/mcp-seo-audit/actions/workflows/ci.yml/badge.svg)](https://github.com/mk-techi/mcp-seo-audit/actions/workflows/ci.yml)
 ![demo](https://github.com/mk-techi/mcp-seo-audit/raw/main/demo.gif)
 
 **On-page SEO analysis as MCP tools.**
