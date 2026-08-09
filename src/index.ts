@@ -5,7 +5,7 @@ import * as cheerio from "cheerio";
 import { z } from "zod";
 
 const USER_AGENT =
-  "Mozilla/5.0 (compatible; mcp-seo-audit/0.3; +https://github.com/mk-techi/mcp-seo-audit)";
+  "Mozilla/5.0 (compatible; mcp-seo-audit/0.4; +https://github.com/mk-techi/mcp-seo-audit)";
 
 const FETCH_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
@@ -15,7 +15,7 @@ const SITEMAP_TIMEOUT_MS = 30_000;
 const MAX_SITEMAP_BYTES = 50 * 1024 * 1024;
 
 type Fetched = { status: number; body: string; finalUrl: string };
-type FetchLimits = { timeoutMs?: number; maxBytes?: number };
+type FetchLimits = { timeoutMs?: number; maxBytes?: number; headers?: Record<string, string> };
 
 async function readBody(res: Response, maxBytes: number): Promise<string> {
   if (!res.body) return "";
@@ -36,9 +36,15 @@ async function readBody(res: Response, maxBytes: number): Promise<string> {
   return Buffer.concat(chunks).toString("utf-8");
 }
 
-async function get(url: string, limits: FetchLimits = {}): Promise<Fetched> {
+async function get(url: string, limits: FetchLimits = {}, postJson?: string): Promise<Fetched> {
   const res = await fetch(url, {
-    headers: { "User-Agent": USER_AGENT },
+    method: postJson === undefined ? "GET" : "POST",
+    headers: {
+      "User-Agent": USER_AGENT,
+      ...(postJson === undefined ? {} : { "Content-Type": "application/json" }),
+      ...limits.headers,
+    },
+    body: postJson,
     redirect: "follow",
     signal: AbortSignal.timeout(limits.timeoutMs ?? FETCH_TIMEOUT_MS),
   });
@@ -368,7 +374,75 @@ function crawlSummary(
   );
 }
 
-const server = new McpServer({ name: "mcp-seo-audit", version: "0.3.1" });
+// Overridable so tests can point at a local mock of the CrUX API ("||" so an
+// empty value also falls back to the real endpoint).
+const CRUX_ENDPOINT =
+  process.env.CRUX_API_ENDPOINT || "https://chromeuxreport.googleapis.com/v1/records:queryRecord";
+const CRUX_KEY_HELP =
+  "check_vitals needs a free Google API key in the CRUX_API_KEY environment variable. " +
+  "Create one at https://console.cloud.google.com/apis/credentials and enable the " +
+  "Chrome UX Report API for its project (https://developer.chrome.com/docs/crux/api) — " +
+  "no billing account required. All other tools work without it.";
+
+type VitalVerdict = "good" | "needs improvement" | "poor";
+type Vital = { p75: number; unit: "ms" | "unitless"; verdict: VitalVerdict };
+
+// Official Core Web Vitals thresholds: good is <= the first bound, poor is > the second.
+const VITAL_METRICS: {
+  name: string;
+  apiName: string;
+  good: number;
+  poor: number;
+  unit: "ms" | "unitless";
+}[] = [
+  { name: "lcp", apiName: "largest_contentful_paint", good: 2500, poor: 4000, unit: "ms" },
+  { name: "cls", apiName: "cumulative_layout_shift", good: 0.1, poor: 0.25, unit: "unitless" },
+  { name: "inp", apiName: "interaction_to_next_paint", good: 200, poor: 500, unit: "ms" },
+  { name: "fcp", apiName: "first_contentful_paint", good: 1800, poor: 3000, unit: "ms" },
+  { name: "ttfb", apiName: "time_to_first_byte", good: 800, poor: 1800, unit: "ms" },
+];
+
+type CruxResponse = {
+  record?: { metrics?: Record<string, unknown>; collectionPeriod?: unknown };
+  urlNormalizationDetails?: { originalUrl?: string; normalizedUrl?: string };
+  error?: { message?: string; status?: string };
+};
+
+function extractVitals(metrics: Record<string, unknown>): Record<string, Vital> {
+  const vitals: Record<string, Vital> = {};
+  for (const { name, apiName, good, poor, unit } of VITAL_METRICS) {
+    // TTFB is still reported as experimental_time_to_first_byte by the API
+    const metric = (metrics[apiName] ?? metrics[`experimental_${apiName}`]) as
+      | { percentiles?: { p75?: number | string } }
+      | undefined;
+    const raw = metric?.percentiles?.p75;
+    if (raw === undefined) continue;
+    const p75 = Number(raw);
+    if (!Number.isFinite(p75)) continue;
+    vitals[name] = {
+      p75,
+      unit,
+      verdict: p75 <= good ? "good" : p75 <= poor ? "needs improvement" : "poor",
+    };
+  }
+  return vitals;
+}
+
+function vitalsSummary(vitals: Record<string, Vital>): string {
+  const names = Object.keys(vitals);
+  if (names.length === 0) return "CrUX returned a record but none of the known metrics.";
+  const order: VitalVerdict[] = ["good", "needs improvement", "poor"];
+  const core = ["lcp", "cls", "inp"].flatMap((n) => (vitals[n] ? [vitals[n].verdict] : []));
+  const overall =
+    core.length > 0 ? order[Math.max(...core.map((v) => order.indexOf(v)))] : null;
+  const parts = names.map((n) => {
+    const v = vitals[n];
+    return `${n.toUpperCase()} ${v.p75}${v.unit === "ms" ? " ms" : ""} (${v.verdict})`;
+  });
+  return parts.join(", ") + (overall ? `. Core Web Vitals assessment: ${overall}.` : ".");
+}
+
+const server = new McpServer({ name: "mcp-seo-audit", version: "0.4.0" });
 
 server.registerTool(
   "audit_page",
@@ -674,6 +748,123 @@ server.registerTool(
     }
 
     return result(report);
+  }
+);
+
+server.registerTool(
+  "check_vitals",
+  {
+    title: "Check real-user Core Web Vitals (CrUX)",
+    description:
+      "Query Google's Chrome UX Report API for the Core Web Vitals real Chrome users " +
+      "experienced over the last 28 days: LCP, CLS and INP (plus FCP and TTFB when " +
+      "reported), each as its 75th-percentile value with a good / needs improvement / " +
+      "poor verdict against Google's official thresholds. A bare origin is queried as " +
+      "the site-wide aggregate; a URL with a path or query as that page only. Requires " +
+      "a free API key in the CRUX_API_KEY environment variable; every other tool works " +
+      "without it.",
+    inputSchema: {
+      url: z.string().url(),
+      formFactor: z
+        .enum(["PHONE", "DESKTOP", "TABLET", "ALL"])
+        .default("PHONE")
+        .describe("PHONE by default — Google indexes mobile-first"),
+    },
+  },
+  async ({ url, formFactor }) => {
+    const key = process.env.CRUX_API_KEY;
+    if (!key) {
+      return result({ url, hasData: false, error: "missing_api_key", message: CRUX_KEY_HELP });
+    }
+
+    const parsed = new URL(url);
+    parsed.hash = ""; // CrUX indexes fragment-less URLs
+    const level = parsed.pathname === "/" && !parsed.search ? "origin" : "url";
+    const query: Record<string, string> =
+      level === "origin" ? { origin: parsed.origin } : { url: parsed.toString() };
+    if (formFactor !== "ALL") query.formFactor = formFactor;
+
+    // The key travels in a header, never in the URL: fetch errors quote the
+    // URL verbatim in their message, which flows back to the client.
+    const { status, body } = await get(
+      CRUX_ENDPOINT,
+      { headers: { "X-Goog-Api-Key": key } },
+      JSON.stringify(query)
+    );
+
+    let response: CruxResponse = {};
+    try {
+      response = JSON.parse(body) as CruxResponse;
+    } catch {
+      // non-JSON error body: fall through with the raw text below
+    }
+    const apiMessage = response.error?.message ?? body.slice(0, 200);
+
+    // Only the API's own NOT_FOUND means "no data" — any other 404 (wrong
+    // endpoint, intercepting proxy) is a configuration error, not low traffic.
+    if (status === 404 && response.error?.status === "NOT_FOUND") {
+      const suggestions = [
+        ...(level === "url"
+          ? [
+              `try the bare origin (${parsed.origin}) — the site-wide aggregate needs ` +
+                "far less traffic than any single page",
+            ]
+          : []),
+        ...(formFactor !== "ALL"
+          ? [
+              `try formFactor ALL — ${formFactor} data alone can be missing even when ` +
+                "the site has enough traffic overall",
+            ]
+          : []),
+      ];
+      return result({
+        url,
+        formFactor,
+        level,
+        hasData: false,
+        message:
+          `CrUX has no field data for this ${level === "origin" ? "origin" : "URL"} ` +
+          `on ${formFactor}: not enough Chrome traffic over the last 28 days.` +
+          (suggestions.length > 0 ? ` Suggestions: ${suggestions.join("; ")}.` : ""),
+      });
+    }
+    if (status >= 400) {
+      const [error, message] = /API key not valid/i.test(apiMessage)
+        ? ["invalid_api_key", `The CRUX_API_KEY is not valid: ${apiMessage}`]
+        : status === 429
+          ? ["quota_exceeded", `CrUX API quota exceeded, retry in a minute: ${apiMessage}`]
+          : status === 403
+            ? [
+                "api_not_enabled",
+                "Access denied — the Chrome UX Report API is probably not enabled for " +
+                  `this key's project, or the key's restrictions block it: ${apiMessage}`,
+              ]
+            : ["api_error", `CrUX API error (HTTP ${status}): ${apiMessage}`];
+      return result({ url, hasData: false, error, message });
+    }
+
+    if (!response.record) {
+      return result({
+        url,
+        hasData: false,
+        error: "api_error",
+        message: `CrUX API answered HTTP ${status} without a record — unexpected response shape.`,
+      });
+    }
+
+    const vitals = extractVitals(response.record.metrics ?? {});
+    return result({
+      url,
+      formFactor,
+      level,
+      hasData: true,
+      collectionPeriod: response.record.collectionPeriod ?? null,
+      ...(response.urlNormalizationDetails
+        ? { urlNormalizationDetails: response.urlNormalizationDetails }
+        : {}),
+      metrics: vitals,
+      summary: vitalsSummary(vitals),
+    });
   }
 );
 

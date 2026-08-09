@@ -5,7 +5,7 @@
 
 **On-page SEO analysis as MCP tools.**
 
-An [MCP](https://modelcontextprotocol.io) server that exposes on-page SEO analysis — metas, structured data, robots.txt, sitemaps and links — as tools any MCP-compatible client can call. No API keys, no accounts: everything runs off plain public-page fetches.
+An [MCP](https://modelcontextprotocol.io) server that exposes on-page SEO analysis — metas, structured data, robots.txt, sitemaps and links — as tools any MCP-compatible client can call. The six core tools need no API keys and no accounts: everything runs off plain public-page fetches. `check_vitals` optionally adds real-user Core Web Vitals with a [free API key](#core-web-vitals-crux-api-key).
 
 ## Tools
 
@@ -17,6 +17,7 @@ An [MCP](https://modelcontextprotocol.io) server that exposes on-page SEO analys
 | `parse_sitemap` | URL counts, `lastmod` sample, nested sitemap indexes |
 | `extract_links` | Internal/external/nofollow split, optional broken-link check |
 | `crawl_site` | Breadth-first crawl of internal links, auditing every page and aggregating findings by issue category |
+| `check_vitals` | Real-user Core Web Vitals from the Chrome UX Report: LCP, CLS, INP (plus FCP and TTFB) at the 75th percentile with Google's good / needs improvement / poor verdicts — needs a [free API key](#core-web-vitals-crux-api-key) |
 
 The server returns structured data and leaves the interpretation to the client. The same tools drive a quick audit, a competitor comparison, or a full crawl conversation.
 
@@ -74,14 +75,33 @@ Then point the client at the local checkout instead of the published package:
 }
 ```
 
+### Core Web Vitals (CrUX) API key
+
+`check_vitals` queries Google's [Chrome UX Report API](https://developer.chrome.com/docs/crux/api) — the Core Web Vitals real Chrome users experienced over the last 28 days, the same field data Google Search uses. It reads a key from the `CRUX_API_KEY` environment variable:
+
+```json
+{
+  "mcpServers": {
+    "seo-audit": {
+      "command": "npx",
+      "args": ["mcp-seo-audit"],
+      "env": { "CRUX_API_KEY": "your-key" }
+    }
+  }
+}
+```
+
+The key is free and needs no billing account: create an API key in the [Google Cloud console](https://console.cloud.google.com/apis/credentials) and enable the **Chrome UX Report API** for its project. Without the key, `check_vitals` explains how to get one and every other tool keeps working.
+
 ## Usage
 
-Once connected, the six tools are available. Example prompts:
+Once connected, the tools are available. Example prompts:
 
 - *Audit example.com and give me a prioritized fix list.*
 - *Does this page have valid JSON-LD? Which types, and what's missing for rich results?*
 - *Compare the on-page SEO of my landing page against a competitor's.*
 - *Find broken internal links on the homepage.*
+- *How are my real-user Core Web Vitals on mobile, and which metric should I fix first?*
 
 ## Build
 
@@ -93,7 +113,7 @@ npm start       # runs the compiled server
 ## Roadmap
 
 - [x] [`crawl_site` - follow internal links up to N pages and aggregate issues](https://github.com/mk-techi/mcp-seo-audit/issues/1)
-- [ ] [Core Web Vitals via the public CrUX API](https://github.com/mk-techi/mcp-seo-audit/issues/2)
+- [x] [Core Web Vitals via the public CrUX API](https://github.com/mk-techi/mcp-seo-audit/issues/2)
 - [x] [Schema validation against Google's rich results requirements](https://github.com/mk-techi/mcp-seo-audit/issues/3)
 - [x] [Publish to npm (`npx mcp-seo-audit`)](https://github.com/mk-techi/mcp-seo-audit/issues/4)
 
