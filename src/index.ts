@@ -16,6 +16,9 @@ const MAX_SITEMAP_BYTES = 50 * 1024 * 1024;
 
 type Fetched = { status: number; body: string; finalUrl: string };
 type FetchLimits = { timeoutMs?: number; maxBytes?: number; headers?: Record<string, string> };
+type FetchedWithChain = Fetched & { chain: string[] };
+
+const MAX_REDIRECT_HOPS = 10;
 
 async function readBody(res: Response, maxBytes: number): Promise<string> {
   if (!res.body) return "";
@@ -50,6 +53,44 @@ async function get(url: string, limits: FetchLimits = {}, postJson?: string): Pr
   });
   const body = await readBody(res, limits.maxBytes ?? MAX_RESPONSE_BYTES);
   return { status: res.status, body, finalUrl: res.url };
+}
+
+/**
+ * Like get(), but walks redirects one hop at a time (redirect: "manual")
+ * instead of letting fetch follow them silently, so the caller can see the
+ * full chain. Used only by crawl_site (issue #6): every other tool just
+ * wants the final page and doesn't care how it got there.
+ *
+ * `chain` holds every URL requested BEFORE the final one (empty when there
+ * was no redirect at all); the caller appends finalUrl to get the full path.
+ */
+async function getFollowingRedirects(
+  url: string,
+  limits: FetchLimits = {}
+): Promise<FetchedWithChain> {
+  const chain: string[] = [];
+  let current = url;
+  for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+    const res = await fetch(current, {
+      method: "GET",
+      headers: { "User-Agent": USER_AGENT, ...limits.headers },
+      redirect: "manual",
+      signal: AbortSignal.timeout(limits.timeoutMs ?? FETCH_TIMEOUT_MS),
+    });
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("location");
+      // A redirect status with no Location header is malformed; treat its
+      // body (if any) as the final answer rather than looping forever.
+      if (location) {
+        chain.push(current);
+        current = new URL(location, current).toString();
+        continue;
+      }
+    }
+    const body = await readBody(res, limits.maxBytes ?? MAX_RESPONSE_BYTES);
+    return { status: res.status, body, finalUrl: current, chain };
+  }
+  throw new Error(`Too many redirects (> ${MAX_REDIRECT_HOPS}): ${url}`);
 }
 
 function result(data: unknown) {
@@ -322,6 +363,11 @@ type FetchFailure = {
   error: string | null;
 };
 
+type RedirectChainEntry = {
+  chain: string[];
+  foundOn: string | null;
+};
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -360,11 +406,14 @@ function crawlSummary(
   startUrl: string,
   pagesCrawled: number,
   pagesFailed: number,
-  issues: Record<IssueCategory, string[]>
+  issues: Record<IssueCategory, string[]>,
+  redirectChainCount: number
 ): string {
   const nonEmpty = Object.values(issues).filter((urls) => urls.length > 0);
-  const categories = nonEmpty.length + (pagesFailed > 0 ? 1 : 0);
-  const total = nonEmpty.reduce((sum, urls) => sum + urls.length, 0) + pagesFailed;
+  const categories =
+    nonEmpty.length + (pagesFailed > 0 ? 1 : 0) + (redirectChainCount > 0 ? 1 : 0);
+  const total =
+    nonEmpty.reduce((sum, urls) => sum + urls.length, 0) + pagesFailed + redirectChainCount;
   return (
     `Crawled ${pagesCrawled} page(s) from ${startUrl}` +
     (pagesFailed > 0 ? `, ${pagesFailed} failed to fetch` : "") +
@@ -640,7 +689,10 @@ server.registerTool(
       "requires for its rich result; use extract_schema on those pages for the details. " +
       "Fetch errors carry the HTTP status (null for a network-level failure, with the " +
       "message in error) and foundOn, the first page found linking to that URL — not every " +
-      "page linking to it, since a dead link in a shared template is fixed once.",
+      "page linking to it, since a dead link in a shared template is fixed once. " +
+      "redirectChains lists URLs whose resolution took more than one hop, each with the " +
+      "full chain and the page that linked to it — every hop costs crawl budget and " +
+      "dilutes link equity.",
     inputSchema: {
       startUrl: z.string().url(),
       maxPages: z.number().int().min(1).max(100).default(20),
@@ -666,6 +718,7 @@ server.registerTool(
       invalidJsonLd: [],
     };
     const fetchErrors: FetchFailure[] = [];
+    const redirectChains: RedirectChainEntry[] = [];
     const titles = new Map<string, string[]>();
     const foundOn = new Map<string, string>();
     let pagesCrawled = 0;
@@ -678,9 +731,9 @@ server.registerTool(
       const fail = (status: number | null, error: string | null) =>
         fetchErrors.push({ url: current, status, foundOn: foundOn.get(current) ?? null, error });
 
-      let page: Fetched;
+      let page: FetchedWithChain;
       try {
-        page = await get(current);
+        page = await getFollowingRedirects(current);
       } catch (err) {
         fail(null, errorMessage(err));
         continue;
@@ -688,6 +741,12 @@ server.registerTool(
       if (page.status >= 400) {
         fail(page.status, null);
         continue;
+      }
+      if (page.chain.length > 0) {
+        redirectChains.push({
+          chain: [...page.chain, page.finalUrl],
+          foundOn: foundOn.get(current) ?? null,
+        });
       }
       // The start URL may redirect to another origin (http→https, apex→www):
       // follow the site where it actually lives, or every link gets rejected.
@@ -738,13 +797,16 @@ server.registerTool(
       startUrl,
       pagesCrawled,
       pagesFailed,
-      summary: crawlSummary(startUrl, pagesCrawled, pagesFailed, issues),
+      summary: crawlSummary(startUrl, pagesCrawled, pagesFailed, issues, redirectChains.length),
     };
     for (const [category, urls] of Object.entries(issues)) {
       if (urls.length > 0) report[category] = issueGroup(urls, maxIssuesPerCategory);
     }
     if (fetchErrors.length > 0) {
       report.fetchErrors = issueGroup(fetchErrors, maxIssuesPerCategory);
+    }
+    if (redirectChains.length > 0) {
+      report.redirectChains = issueGroup(redirectChains, maxIssuesPerCategory);
     }
 
     return result(report);

@@ -26,12 +26,21 @@ const serverA = http.createServer((req, res) => {
     res.end(`<html><body>
       <a href="/page2">internal ok</a>
       <a href="/dead">internal dead</a>
+      <a href="/redir1">redirect chain</a>
       <a href="http://127.0.0.1:42810/x">prefix superset origin</a>
       <a href="https://example.com/ext">external</a>
     </body></html>`);
   } else if (req.url === "/page2") {
     res.setHeader("content-type", "text/html");
     res.end("<html><body>page2</body></html>");
+  } else if (req.url === "/redir1") {
+    res.statusCode = 302;
+    res.setHeader("location", "/redir2");
+    res.end();
+  } else if (req.url === "/redir2") {
+    res.statusCode = 301;
+    res.setHeader("location", "/page2");
+    res.end();
   } else if (req.url === "/dead") {
     req.socket.destroy(); // network-level failure, no HTTP status
   } else if (req.url === "/tarpit") {
@@ -180,6 +189,29 @@ function check(label, cond, evidence) {
     "size cap: a 6 MB page is rejected with an explicit error",
     isError && /exceeded/i.test(text),
     `isError=${isError} message=${text.slice(0, 120)}`
+  );
+}
+
+// redirect chains: a multi-hop redirect is reported with the full chain,
+// not just silently followed to its destination
+{
+  const { text } = await callTool("crawl_site", { startUrl: "http://127.0.0.1:4281/", maxPages: 10 });
+  const r = JSON.parse(text);
+  const chains = r.redirectChains?.urls ?? [];
+  const found = chains.find((c) => c.chain[0] === "http://127.0.0.1:4281/redir1");
+  check(
+    "crawl: a 2-hop redirect (redir1 -> redir2 -> page2) is reported as a full chain",
+    found !== undefined &&
+      found.chain.length === 3 &&
+      found.chain[1] === "http://127.0.0.1:4281/redir2" &&
+      found.chain[2] === "http://127.0.0.1:4281/page2" &&
+      found.foundOn === "http://127.0.0.1:4281/",
+    `redirectChains=${JSON.stringify(r.redirectChains)}`
+  );
+  check(
+    "crawl: a direct link (page2, no redirect) is NOT reported as a chain",
+    chains.every((c) => c.chain[0] !== "http://127.0.0.1:4281/page2"),
+    `redirectChains=${JSON.stringify(r.redirectChains)}`
   );
 }
 
